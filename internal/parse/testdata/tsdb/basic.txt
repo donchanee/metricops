@@ -1,0 +1,24 @@
+Block ID: 01HW5KZTESTBASICFIXTURE000000
+Duration: 2h0m0s
+Total Series: 12500
+Label names: 18
+Postings (unique label pairs): 3125
+Postings entries (total label pairs): 37500
+
+Highest cardinality metric names:
+5000 http_request_duration_seconds_bucket
+3000 app_user_actions_total
+1500 grpc_server_handled_total
+1200 node_cpu_seconds_total
+800 go_memstats_alloc_bytes
+500 process_resident_memory_bytes
+200 go_goroutines
+100 node_load1
+1 go_info
+
+Highest cardinality labels:
+8000 instance
+4500 job
+2000 handler
+1500 method
+500 status_code

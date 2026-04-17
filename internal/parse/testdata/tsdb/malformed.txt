@@ -1,0 +1,11 @@
+Block ID: garbled
+Total Series: not-a-number
+
+Highest cardinality metric names:
+500 http_requests_total
+this line is bogus
+garbage without a number
+1000 good_metric
+-5 negative_count_invalid
+  700 trimmed_spaces_ok
+500 http_requests_total
