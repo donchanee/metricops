@@ -1,0 +1,22 @@
+# binaries (root-anchored so cmd/metricops/ stays tracked)
+/metricops
+/metricops.exe
+/bin/
+/dist/
+
+# tests + coverage
+*.test
+*.out
+coverage.*
+
+# vendor
+/vendor/
+
+# editors
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
