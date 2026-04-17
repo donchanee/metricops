@@ -1,0 +1,5 @@
+groups:
+  - name: {{ .Values.groupName }}
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_errors_total[5m]) > {{ .Values.threshold }}
