@@ -14,14 +14,14 @@ No network calls. No telemetry. No cloud dependency.
 ## Status
 
 Pre-release. Under active development. Not yet suitable for production use.
-Follow [github.com/\<owner\>/metricops/releases](.) for v0.1.0.
+Follow [github.com/donchanee/metricops/releases](https://github.com/donchanee/metricops/releases) for v0.1.0.
 
 ## Install
 
 Requires Go 1.22+.
 
 ```bash
-go install metricops/cmd/metricops@latest
+go install github.com/donchanee/metricops/cmd/metricops@latest
 ```
 
 Pre-built binaries will be published via GitHub Releases from v0.1.0.
