@@ -1,0 +1,35 @@
+{
+  "uid": "synthetic-basic",
+  "title": "Basic Dashboard",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request Rate",
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [
+        {"refId": "A", "expr": "rate(http_requests_total[5m])", "datasource": {"type": "prometheus", "uid": "prom"}},
+        {"refId": "B", "expr": "rate(http_errors_total[5m])", "datasource": {"type": "prometheus", "uid": "prom"}}
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Goroutines",
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [
+        {"refId": "A", "expr": "go_goroutines"}
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "p99 Latency",
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.99, sum by (le, job) (rate(http_request_duration_seconds_bucket[5m])))"}
+      ]
+    }
+  ]
+}

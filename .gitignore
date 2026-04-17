@@ -20,3 +20,10 @@ coverage.*
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated fixture outputs (regenerate via:
+#   go run testdata/fixtures/generate.go -out ./testdata/fixtures)
+/testdata/fixtures/tsdb-analyze.txt
+/testdata/fixtures/MANIFEST.json
+/testdata/fixtures/dashboards/
+/testdata/fixtures/rules/

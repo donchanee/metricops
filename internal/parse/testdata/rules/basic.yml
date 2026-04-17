@@ -1,0 +1,26 @@
+groups:
+  - name: http
+    interval: 30s
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate on {{ $labels.job }}"
+      - alert: SlowRequests
+        expr: histogram_quantile(0.99, sum by (le, job) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels:
+          severity: warning
+      - record: job:http_requests:rate5m
+        expr: sum by (job) (rate(http_requests_total[5m]))
+      - record: job:http_errors:rate5m
+        expr: sum by (job) (rate(http_errors_total[5m]))
+  - name: runtime
+    interval: 1m
+    rules:
+      - alert: HighGoroutines
+        expr: go_goroutines > 10000
+        for: 5m

@@ -1,0 +1,52 @@
+{
+  "uid": "mixed-sources",
+  "title": "Mixed Datasource Dashboard",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Prom panel",
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [
+        {"refId": "A", "expr": "rate(http_requests_total[5m])"}
+      ]
+    },
+    {
+      "id": 2,
+      "type": "logs",
+      "title": "Loki panel",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [
+        {"refId": "A", "expr": "{job=\"api\"} |= \"error\""}
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Legacy string datasource",
+      "datasource": "Prometheus",
+      "targets": [
+        {"refId": "A", "expr": "go_goroutines"}
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Legacy non-prom string",
+      "datasource": "CloudWatch",
+      "targets": [
+        {"refId": "A", "expr": "some_cloudwatch_query"}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Template variable target",
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [
+        {"refId": "A", "expr": "rate(http_requests_total{job=\"$service\"}[${__range}])"}
+      ]
+    }
+  ]
+}

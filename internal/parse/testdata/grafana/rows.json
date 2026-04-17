@@ -1,0 +1,47 @@
+{
+  "uid": "rows-dashboard",
+  "title": "Dashboard with Rows",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 10,
+      "type": "row",
+      "title": "HTTP Row",
+      "panels": [
+        {
+          "id": 11,
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "prom"},
+          "targets": [
+            {"refId": "A", "expr": "rate(http_requests_total[5m])"}
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "prom"},
+          "targets": [
+            {"refId": "A", "expr": "rate(http_errors_total[5m])"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Repeated panel (should skip)",
+      "repeat": "job",
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [
+        {"refId": "A", "expr": "rate(queue_messages_consumed_total[5m])"}
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "No-target panel",
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": []
+    }
+  ]
+}
