@@ -17,6 +17,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Use bash everywhere so flag parsing (e.g., -coverprofile=foo.out)
+        # does not get mangled by PowerShell on windows-latest.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
