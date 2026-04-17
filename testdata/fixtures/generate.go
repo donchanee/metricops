@@ -42,7 +42,9 @@ import (
 // so tests can build fixtures with specific characteristics (tiny, huge, all-unused,
 // no-hotspots, and so on) without touching this file.
 type Config struct {
-	OutDir                   string  `json:"out_dir"`
+	// OutDir is runtime-only; excluded from manifest JSON so the fixture
+	// determinism check passes across different invocation paths.
+	OutDir                   string  `json:"-"`
 	Seed                     int64   `json:"seed"`
 	NumMetrics               int     `json:"num_metrics"`
 	NumDashboards            int     `json:"num_dashboards"`
