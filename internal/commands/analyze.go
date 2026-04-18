@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/donchanee/metricops/internal/analyze"
 	"github.com/donchanee/metricops/internal/builder"
 	"github.com/donchanee/metricops/internal/model"
 	"github.com/donchanee/metricops/internal/parse"
+	"github.com/donchanee/metricops/internal/render"
 )
 
 // Exit code sentinels. The main package maps these to process exit codes per
@@ -120,44 +123,48 @@ For CI integration, see --fail-on and --strict.`,
 
 // runAnalyze is the pipeline orchestrator.
 //
-// Stage status (W2):
+//	parse → build → analyze → render
 //
-//	parse  → DONE (tsdb + grafana + rules)
-//	build  → DONE (references attributed via promqlx extraction)
-//	analyze → TODO (week 3: unused + cardinality + cost)
-//	render → TODO (week 3: markdown + json)
+// Stage contracts (eng-review locked):
+//   - parse/ returns raw metrics and references; never does analysis.
+//   - builder/ joins them via promqlx into a *model.Model.
+//   - analyze/ runs detectors (unused, hotspots, cost, recommendations).
+//   - render/ writes the final Report to stdout in markdown or JSON.
 //
-// For W2, after the model is built we print a raw summary to stderr so the
-// full parse→build pipeline can be exercised end-to-end. The markdown/JSON
-// report lands in W3.
+// Pipeline-health warnings from builder are written to stderr regardless
+// of output format so automation consumers still see them.
 func runAnalyze(f *analyzeFlags) error {
-	// 1. TSDB metrics (required).
+	// 1. Schema validation (only 1.0 is supported today).
+	if f.schema != "" && f.schema != model.SchemaVersion {
+		return WithExitCode(fmt.Errorf("unsupported --schema=%s (this build supports %s)",
+			f.schema, model.SchemaVersion), ExitUsage)
+	}
+
+	// 2. TSDB metrics (required).
 	metrics, err := parse.ParseTSDBAnalyzeFile(f.tsdbPath)
 	if err != nil {
 		return WithExitCode(fmt.Errorf("tsdb: %w", err), ExitUsage)
 	}
 
-	// 2. References from dashboards and/or rules. Both optional, at least
-	//    one recommended. In strict mode, a parse error is fatal; otherwise
-	//    warn + continue.
+	// 3. References from dashboards and/or rules. Both optional.
 	var refs []model.Reference
 	if f.grafanaPath != "" {
-		r, err := parse.ParseGrafanaDir(f.grafanaPath)
-		if err != nil {
+		r, perr := parse.ParseGrafanaDir(f.grafanaPath)
+		if perr != nil {
 			if f.strict {
-				return WithExitCode(fmt.Errorf("grafana: %w", err), ExitUsage)
+				return WithExitCode(fmt.Errorf("grafana: %w", perr), ExitUsage)
 			}
-			fmt.Fprintf(os.Stderr, "warning: grafana parse: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: grafana parse: %v\n", perr)
 		}
 		refs = append(refs, r...)
 	}
 	if f.rulesPath != "" {
-		r, err := parse.ParseRulesDir(f.rulesPath)
-		if err != nil {
+		r, perr := parse.ParseRulesDir(f.rulesPath)
+		if perr != nil {
 			if f.strict {
-				return WithExitCode(fmt.Errorf("rules: %w", err), ExitUsage)
+				return WithExitCode(fmt.Errorf("rules: %w", perr), ExitUsage)
 			}
-			fmt.Fprintf(os.Stderr, "warning: rules parse: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: rules parse: %v\n", perr)
 		}
 		refs = append(refs, r...)
 	}
@@ -166,28 +173,78 @@ func runAnalyze(f *analyzeFlags) error {
 			"warning: no --grafana or --rules provided; every metric will be reported as unused")
 	}
 
-	// 3. Build the model by attributing references to metrics via promqlx.
+	// 4. Build model.
 	m, br, err := builder.Build(metrics, refs, builder.Options{Strict: f.strict})
 	if err != nil {
 		return WithExitCode(err, ExitFindings)
 	}
 
-	// 4. W2 summary (W3 replaces this with a real rendered report).
-	unused := 0
-	for _, metric := range m.Metrics {
-		if !metric.IsUsed() {
-			unused++
-		}
+	// 5. Pipeline-health warnings to stderr.
+	if br.ReferencesOrphaned > 0 {
+		fmt.Fprintf(os.Stderr,
+			"note: %d references point at metrics not in TSDB (dangling). These are silently dropped.\n",
+			br.ReferencesOrphaned)
 	}
-	fmt.Fprintln(os.Stderr, "=== metricops analyze (W2 summary — real report in W3) ===")
-	fmt.Fprintf(os.Stderr, "  metrics (TSDB):            %d\n", len(m.Metrics))
-	fmt.Fprintf(os.Stderr, "  total active series:       %d\n", m.TotalActiveSeries)
-	fmt.Fprintf(os.Stderr, "  references parsed:         %d\n", len(refs))
-	fmt.Fprintf(os.Stderr, "    attributed to metric:    %d\n", br.ReferencesAttributed)
-	fmt.Fprintf(os.Stderr, "    orphaned (metric gone):  %d\n", br.ReferencesOrphaned)
-	fmt.Fprintf(os.Stderr, "    unparseable expr:        %d\n", br.ReferencesUnparseable)
-	fmt.Fprintf(os.Stderr, "  metrics flagged unused:    %d / %d\n", unused, len(m.Metrics))
+	if br.ReferencesUnparseable > 0 && !f.strict {
+		fmt.Fprintf(os.Stderr,
+			"note: %d references have unparseable PromQL and were skipped. Rerun with --strict to fail fast.\n",
+			br.ReferencesUnparseable)
+	}
 
-	// Week 3 will replace this with render.Markdown / render.JSON.
+	// 6. Analyze.
+	bps := f.bytesPerSample
+	if bps <= 0 {
+		bps = analyze.DefaultBytesPerSample
+	}
+
+	unused, err := analyze.DetectUnused(m, bps)
+	if err != nil {
+		return WithExitCode(fmt.Errorf("detect unused: %w", err), ExitFindings)
+	}
+	hotspots, err := analyze.DetectHotspots(m, analyze.HotspotOptions{})
+	if err != nil {
+		return WithExitCode(fmt.Errorf("detect hotspots: %w", err), ExitFindings)
+	}
+	summary, err := analyze.EstimateSummary(m, bps)
+	if err != nil {
+		return WithExitCode(fmt.Errorf("summary: %w", err), ExitFindings)
+	}
+	recs, err := analyze.BuildRecommendations(unused, hotspots)
+	if err != nil {
+		return WithExitCode(fmt.Errorf("recommendations: %w", err), ExitFindings)
+	}
+
+	// 7. Assemble final Report.
+	report := &model.Report{
+		SchemaVersion:       model.SchemaVersion,
+		GeneratedAt:         time.Now().UTC(),
+		Summary:             summary,
+		UnusedMetrics:       unused,
+		CardinalityHotspots: hotspots,
+		Recommendations:     recs,
+	}
+
+	// 8. Render to stdout.
+	switch f.format {
+	case "", "markdown", "md":
+		if err := render.Markdown(os.Stdout, report); err != nil {
+			return WithExitCode(fmt.Errorf("render markdown: %w", err), ExitFindings)
+		}
+	case "json":
+		if err := render.JSON(os.Stdout, report); err != nil {
+			return WithExitCode(fmt.Errorf("render json: %w", err), ExitFindings)
+		}
+	default:
+		return WithExitCode(fmt.Errorf("unknown --format=%q (want: markdown|json)", f.format), ExitUsage)
+	}
+
+	// 9. CI gating via --fail-on.
+	if f.failOn == "findings" && (len(unused) > 0 || len(hotspots) > 0) {
+		return WithExitCode(
+			fmt.Errorf("findings present (%d unused, %d hotspots)", len(unused), len(hotspots)),
+			ExitFindings,
+		)
+	}
+
 	return nil
 }
