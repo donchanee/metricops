@@ -5,6 +5,7 @@
 package commands
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -121,34 +122,74 @@ For CI integration, see --fail-on and --strict.`,
 	return cmd
 }
 
-// runAnalyze is the pipeline orchestrator.
+// runAnalyze is the entry point for the analyze subcommand. It parses and
+// validates flags, then runs the pipeline under an optional timeout.
 //
-//	parse → build → analyze → render
+// Timeout strategy: since our per-phase operations are CPU-bound and don't
+// hit the network, we wrap the entire pipeline in a goroutine and use a
+// context-deadline select. On timeout the main thread returns; the inner
+// goroutine may linger briefly but the process exits and frees resources.
+// For a short-lived CLI this is acceptable and keeps the implementation
+// simple (no ctx plumbing through parsers/analyzers).
+func runAnalyze(f *analyzeFlags) error {
+	if f.schema != "" && f.schema != model.SchemaVersion {
+		return WithExitCode(fmt.Errorf("unsupported --schema=%s (this build supports %s)",
+			f.schema, model.SchemaVersion), ExitUsage)
+	}
+
+	timeout, err := time.ParseDuration(f.timeout)
+	if err != nil {
+		return WithExitCode(fmt.Errorf("invalid --timeout=%q: %w", f.timeout, err), ExitUsage)
+	}
+	if timeout <= 0 {
+		return WithExitCode(fmt.Errorf("--timeout must be positive, got %s", timeout), ExitUsage)
+	}
+
+	p := newProgress(os.Stderr, f.progress)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runPipeline(p, f)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return WithExitCode(
+			fmt.Errorf("analysis timed out after %s (raise --timeout to allow more time)", timeout),
+			ExitFindings,
+		)
+	}
+}
+
+// runPipeline executes the actual parse → build → analyze → render stages.
+// Split from runAnalyze so the timeout wrapper can stay trivial.
 //
 // Stage contracts (eng-review locked):
-//   - parse/ returns raw metrics and references; never does analysis.
+//   - parse/ returns raw metrics and references; never analyzes.
 //   - builder/ joins them via promqlx into a *model.Model.
 //   - analyze/ runs detectors (unused, hotspots, cost, recommendations).
 //   - render/ writes the final Report to stdout in markdown or JSON.
 //
 // Pipeline-health warnings from builder are written to stderr regardless
 // of output format so automation consumers still see them.
-func runAnalyze(f *analyzeFlags) error {
-	// 1. Schema validation (only 1.0 is supported today).
-	if f.schema != "" && f.schema != model.SchemaVersion {
-		return WithExitCode(fmt.Errorf("unsupported --schema=%s (this build supports %s)",
-			f.schema, model.SchemaVersion), ExitUsage)
-	}
-
-	// 2. TSDB metrics (required).
+func runPipeline(p *progress, f *analyzeFlags) error {
+	// 1. TSDB metrics (required).
+	p.stage("parsing TSDB analyze output")
 	metrics, err := parse.ParseTSDBAnalyzeFile(f.tsdbPath)
 	if err != nil {
 		return WithExitCode(fmt.Errorf("tsdb: %w", err), ExitUsage)
 	}
+	p.done(fmt.Sprintf("  %d metrics", len(metrics)))
 
-	// 3. References from dashboards and/or rules. Both optional.
+	// 2. References from dashboards and/or rules. Both optional.
 	var refs []model.Reference
 	if f.grafanaPath != "" {
+		p.stage("parsing Grafana dashboards")
 		r, perr := parse.ParseGrafanaDir(f.grafanaPath)
 		if perr != nil {
 			if f.strict {
@@ -156,9 +197,11 @@ func runAnalyze(f *analyzeFlags) error {
 			}
 			fmt.Fprintf(os.Stderr, "warning: grafana parse: %v\n", perr)
 		}
+		p.done(fmt.Sprintf("  %d refs", len(r)))
 		refs = append(refs, r...)
 	}
 	if f.rulesPath != "" {
+		p.stage("parsing Prometheus rules")
 		r, perr := parse.ParseRulesDir(f.rulesPath)
 		if perr != nil {
 			if f.strict {
@@ -166,6 +209,7 @@ func runAnalyze(f *analyzeFlags) error {
 			}
 			fmt.Fprintf(os.Stderr, "warning: rules parse: %v\n", perr)
 		}
+		p.done(fmt.Sprintf("  %d refs", len(r)))
 		refs = append(refs, r...)
 	}
 	if f.grafanaPath == "" && f.rulesPath == "" {
@@ -173,16 +217,19 @@ func runAnalyze(f *analyzeFlags) error {
 			"warning: no --grafana or --rules provided; every metric will be reported as unused")
 	}
 
-	// 4. Build model.
+	// 3. Build model.
+	p.stage("building model (PromQL extraction)")
 	m, br, err := builder.Build(metrics, refs, builder.Options{Strict: f.strict})
 	if err != nil {
 		return WithExitCode(err, ExitFindings)
 	}
+	p.done(fmt.Sprintf("  %d refs attributed, %d orphaned, %d unparseable",
+		br.ReferencesAttributed, br.ReferencesOrphaned, br.ReferencesUnparseable))
 
-	// 5. Pipeline-health warnings to stderr.
+	// 4. Pipeline-health notes.
 	if br.ReferencesOrphaned > 0 {
 		fmt.Fprintf(os.Stderr,
-			"note: %d references point at metrics not in TSDB (dangling). These are silently dropped.\n",
+			"note: %d references point at metrics not in TSDB (dangling).\n",
 			br.ReferencesOrphaned)
 	}
 	if br.ReferencesUnparseable > 0 && !f.strict {
@@ -191,12 +238,13 @@ func runAnalyze(f *analyzeFlags) error {
 			br.ReferencesUnparseable)
 	}
 
-	// 6. Analyze.
+	// 5. Analyze.
 	bps := f.bytesPerSample
 	if bps <= 0 {
 		bps = analyze.DefaultBytesPerSample
 	}
 
+	p.stage("running detectors")
 	unused, err := analyze.DetectUnused(m, bps)
 	if err != nil {
 		return WithExitCode(fmt.Errorf("detect unused: %w", err), ExitFindings)
@@ -213,8 +261,10 @@ func runAnalyze(f *analyzeFlags) error {
 	if err != nil {
 		return WithExitCode(fmt.Errorf("recommendations: %w", err), ExitFindings)
 	}
+	p.done(fmt.Sprintf("  %d unused, %d hotspots, %d recommendations",
+		len(unused), len(hotspots), len(recs)))
 
-	// 7. Assemble final Report.
+	// 6. Assemble final Report.
 	report := &model.Report{
 		SchemaVersion:       model.SchemaVersion,
 		GeneratedAt:         time.Now().UTC(),
@@ -224,7 +274,8 @@ func runAnalyze(f *analyzeFlags) error {
 		Recommendations:     recs,
 	}
 
-	// 8. Render to stdout.
+	// 7. Render to stdout.
+	p.stage("rendering report")
 	switch f.format {
 	case "", "markdown", "md":
 		if err := render.Markdown(os.Stdout, report); err != nil {
@@ -237,8 +288,9 @@ func runAnalyze(f *analyzeFlags) error {
 	default:
 		return WithExitCode(fmt.Errorf("unknown --format=%q (want: markdown|json)", f.format), ExitUsage)
 	}
+	p.done("")
 
-	// 9. CI gating via --fail-on.
+	// 8. CI gating via --fail-on.
 	if f.failOn == "findings" && (len(unused) > 0 || len(hotspots) > 0) {
 		return WithExitCode(
 			fmt.Errorf("findings present (%d unused, %d hotspots)", len(unused), len(hotspots)),
