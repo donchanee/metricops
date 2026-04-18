@@ -1,29 +1,57 @@
-// Package analyze applies detection rules to a model.Model. Analyzers never
-// do I/O; they are pure functions over the in-memory model, so tests are
-// fast and deterministic.
+// Package analyze applies detection rules to a model.Model. Analyzers are
+// pure functions over the in-memory model; they never do I/O. This makes
+// them fast and deterministic to test.
 package analyze
 
 import (
-	"errors"
+	"sort"
 
 	"github.com/donchanee/metricops/internal/model"
 )
 
-// ErrNotImplemented is returned by stubs until week 3 impl lands.
-var ErrNotImplemented = errors.New("analyzer not implemented (week 3 TODO)")
+// DetectUnused returns the metrics in m that are present in TSDB but have
+// zero references from any dashboard, alert, or recording rule.
+//
+// Detection rule (locked by eng review):
+//
+//   - A metric is "used" if ANY dashboard panel target, alert rule, or
+//     recording rule references it by name (Reference.Source × Expr).
+//   - Recording-rule chains are NOT traversed in MVP (documented
+//     limitation in promqlx + builder — a metric referenced only via
+//     another recording rule output will appear used; a metric referenced
+//     only through that chain's output will not).
+//
+// Sorting (for deterministic JSON output):
+//
+//   - Primary:   ActiveSeries descending (bigger cost first).
+//   - Secondary: Name ascending (stable tiebreak).
+//
+// BytesPerDayEstimate is computed via EstimateBytesPerDay using the
+// bytesPerSample argument. Callers typically pass the CLI's
+// --bytes-per-sample value or DefaultBytesPerSample.
+func DetectUnused(m *model.Model, bytesPerSample float64) ([]model.UnusedMetric, error) {
+	if m == nil {
+		return nil, nil
+	}
 
-// DetectUnused returns metrics that appear in TSDB but have zero references
-// from any dashboard, alert, or recording rule.
-//
-// Detection rule (eng review):
-//   - A metric is "used" if ANY expr in any dashboard panel, alert rule, or
-//     recording rule references it by name
-//   - Recording-rule chains are NOT traversed in MVP (documented limitation)
-//   - Output is sorted by ActiveSeries descending, then by Name ascending,
-//     for deterministic JSON output
-//
-// Returned slice is safe to place directly into Report.UnusedMetrics after
-// computing BytesPerDayEstimate via the cost package.
-func DetectUnused(m *model.Model) ([]model.UnusedMetric, error) {
-	return nil, ErrNotImplemented
+	out := make([]model.UnusedMetric, 0)
+	for _, metric := range m.Metrics {
+		if metric.IsUsed() {
+			continue
+		}
+		out = append(out, model.UnusedMetric{
+			Name:                metric.Name,
+			ActiveSeries:        metric.ActiveSeries,
+			BytesPerDayEstimate: EstimateBytesPerDay(metric.ActiveSeries, bytesPerSample),
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ActiveSeries != out[j].ActiveSeries {
+			return out[i].ActiveSeries > out[j].ActiveSeries
+		}
+		return out[i].Name < out[j].Name
+	})
+
+	return out, nil
 }
