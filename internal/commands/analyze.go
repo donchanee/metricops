@@ -10,6 +10,10 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/donchanee/metricops/internal/builder"
+	"github.com/donchanee/metricops/internal/model"
+	"github.com/donchanee/metricops/internal/parse"
 )
 
 // Exit code sentinels. The main package maps these to process exit codes per
@@ -114,26 +118,76 @@ For CI integration, see --fail-on and --strict.`,
 	return cmd
 }
 
-// runAnalyze is the orchestrator. Week 1 note: each step below gets its own
-// function as the parsers land.
+// runAnalyze is the pipeline orchestrator.
 //
-// Pipeline (all in internal/):
+// Stage status (W2):
 //
-//   parse.TSDBAnalyze(tsdbPath)              -> []Metric with cardinality
-//   parse.GrafanaDir(grafanaPath) +          -> []Reference
-//   parse.RulesDir(rulesPath)
-//   model.Build(metrics, refs)               -> *Model
-//   analyze.DetectUnused(model)              -> UnusedMetric list
-//   analyze.DetectHotspots(model)            -> CardinalityHotspot list
-//   analyze.EstimateCost(model, bytesPerSample) -> Summary + per-metric costs
-//   render.Markdown(report) | render.JSON(report) -> stdout
+//	parse  → DONE (tsdb + grafana + rules)
+//	build  → DONE (references attributed via promqlx extraction)
+//	analyze → TODO (week 3: unused + cardinality + cost)
+//	render → TODO (week 3: markdown + json)
 //
-// See the eng review test plan artifact for detection rules and edge cases.
+// For W2, after the model is built we print a raw summary to stderr so the
+// full parse→build pipeline can be exercised end-to-end. The markdown/JSON
+// report lands in W3.
 func runAnalyze(f *analyzeFlags) error {
-	// TODO(week-1): implement the pipeline. Until then, return a clear
-	// not-implemented error with usage exit code.
-	fmt.Fprintln(os.Stderr, "analyze: pipeline not yet implemented (week 1 TODO)")
-	fmt.Fprintf(os.Stderr, "  parsed flags: tsdb=%q grafana=%q rules=%q format=%q\n",
-		f.tsdbPath, f.grafanaPath, f.rulesPath, f.format)
-	return WithExitCode(errors.New("not implemented"), ExitFindings)
+	// 1. TSDB metrics (required).
+	metrics, err := parse.ParseTSDBAnalyzeFile(f.tsdbPath)
+	if err != nil {
+		return WithExitCode(fmt.Errorf("tsdb: %w", err), ExitUsage)
+	}
+
+	// 2. References from dashboards and/or rules. Both optional, at least
+	//    one recommended. In strict mode, a parse error is fatal; otherwise
+	//    warn + continue.
+	var refs []model.Reference
+	if f.grafanaPath != "" {
+		r, err := parse.ParseGrafanaDir(f.grafanaPath)
+		if err != nil {
+			if f.strict {
+				return WithExitCode(fmt.Errorf("grafana: %w", err), ExitUsage)
+			}
+			fmt.Fprintf(os.Stderr, "warning: grafana parse: %v\n", err)
+		}
+		refs = append(refs, r...)
+	}
+	if f.rulesPath != "" {
+		r, err := parse.ParseRulesDir(f.rulesPath)
+		if err != nil {
+			if f.strict {
+				return WithExitCode(fmt.Errorf("rules: %w", err), ExitUsage)
+			}
+			fmt.Fprintf(os.Stderr, "warning: rules parse: %v\n", err)
+		}
+		refs = append(refs, r...)
+	}
+	if f.grafanaPath == "" && f.rulesPath == "" {
+		fmt.Fprintln(os.Stderr,
+			"warning: no --grafana or --rules provided; every metric will be reported as unused")
+	}
+
+	// 3. Build the model by attributing references to metrics via promqlx.
+	m, br, err := builder.Build(metrics, refs, builder.Options{Strict: f.strict})
+	if err != nil {
+		return WithExitCode(err, ExitFindings)
+	}
+
+	// 4. W2 summary (W3 replaces this with a real rendered report).
+	unused := 0
+	for _, metric := range m.Metrics {
+		if !metric.IsUsed() {
+			unused++
+		}
+	}
+	fmt.Fprintln(os.Stderr, "=== metricops analyze (W2 summary — real report in W3) ===")
+	fmt.Fprintf(os.Stderr, "  metrics (TSDB):            %d\n", len(m.Metrics))
+	fmt.Fprintf(os.Stderr, "  total active series:       %d\n", m.TotalActiveSeries)
+	fmt.Fprintf(os.Stderr, "  references parsed:         %d\n", len(refs))
+	fmt.Fprintf(os.Stderr, "    attributed to metric:    %d\n", br.ReferencesAttributed)
+	fmt.Fprintf(os.Stderr, "    orphaned (metric gone):  %d\n", br.ReferencesOrphaned)
+	fmt.Fprintf(os.Stderr, "    unparseable expr:        %d\n", br.ReferencesUnparseable)
+	fmt.Fprintf(os.Stderr, "  metrics flagged unused:    %d / %d\n", unused, len(m.Metrics))
+
+	// Week 3 will replace this with render.Markdown / render.JSON.
+	return nil
 }
