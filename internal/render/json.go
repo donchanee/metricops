@@ -2,6 +2,7 @@ package render
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/donchanee/metricops/internal/model"
@@ -9,18 +10,22 @@ import (
 
 // JSON writes the v1.0 JSON schema representation of r to w.
 //
-// Determinism contract (eng review CI gate):
-//   - All slices in r are sorted by the analyzer before this function is
-//     called. Renderer does NOT re-sort.
-//   - All map iteration in r is avoided; any map-derived fields were
-//     materialized into sorted slices earlier.
-//   - encoding/json preserves struct field order, which matches the v1.0
-//     schema ordering in model.Report.
-//   - Indent=2 spaces, compact-ish, never trailing whitespace.
+// Determinism contract (enforced by json_test.go):
 //
-// 10 successive runs against the same input must produce byte-identical
-// output (enforced by a determinism test in week 4).
+//   - All slices in r are pre-sorted by the analyzer.
+//   - The Report struct has no map fields, so there is no map-iteration
+//     nondeterminism at the render stage.
+//   - encoding/json emits struct fields in declaration order, which
+//     matches the v1.0 schema field ordering in model.Report.
+//   - Two successive calls with the same input produce byte-identical
+//     output.
+//
+// Output ends with a trailing newline (encoder default) for tool friendliness
+// (shells, jq pipes).
 func JSON(w io.Writer, r *model.Report) error {
+	if r == nil {
+		return fmt.Errorf("render: nil report")
+	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(r)
